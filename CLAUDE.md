@@ -19,11 +19,12 @@ These are the intended commands once the skeleton exists (CMake presets + vcpkg 
 - Test: `ctest --preset dev`
 - Single test: `ctest --preset dev -R <regex>`, or run the Catch2 test binary directly with a test name / `[tag]` filter
 - Run everything: `docker compose -f deploy/compose/docker-compose.yml up`
+- Integration tests (pytest, brings the stack up itself): `pip install -r tests/integration/requirements.txt && pytest tests/integration`
 
 ## Conventions
 
 - C++20, CMake with presets, dependencies via vcpkg (manifest mode, `vcpkg.json`).
-- Tests with Catch2 v3; mocks with trompeloeil. TDD: test before implementation.
+- C++ tests with Catch2 v3; mocks with trompeloeil. Integration tests against the Compose stack in pytest (ADR-0012). TDD: test before implementation.
 - Root namespace `f2c` (`f2c::core`, `f2c::drivers`, `f2c::config`, ...).
 - Everything in English: code, comments, commits, README, ADRs, specs.
 - Plant configuration in YAML: a single file describes the whole plant.
