@@ -1,0 +1,38 @@
+# Checks out vcpkg at the manifest's builtin-baseline and restores its binary cache (files
+# provider, spec § 9.5). Expects VCPKG_ROOT and VCPKG_BINARY_SOURCES from the workflow env.
+name: Set up vcpkg
+description: Check out vcpkg at the manifest baseline and restore the binary cache.
+
+inputs:
+  cache-key:
+    description: Distinguishes caches of jobs that build dependencies differently.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Read the vcpkg baseline
+      id: baseline
+      shell: bash
+      run: echo "commit=$(jq -r '.["builtin-baseline"]' vcpkg.json)" >> "$GITHUB_OUTPUT"
+
+    - name: Check out vcpkg
+      uses: actions/checkout@v4
+      with:
+        repository: microsoft/vcpkg
+        ref: ${{ steps.baseline.outputs.commit }}
+        path: vcpkg
+
+    - name: Bootstrap vcpkg
+      shell: bash
+      run: |
+        "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
+        mkdir -p "${{ github.workspace }}/vcpkg-binary-cache"
+
+    - name: Restore vcpkg binary cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.workspace }}/vcpkg-binary-cache
+        key: vcpkg-${{ runner.os }}-${{ inputs.cache-key }}-${{ hashFiles('vcpkg.json') }}
+        restore-keys: |
+          vcpkg-${{ runner.os }}-${{ inputs.cache-key }}-
