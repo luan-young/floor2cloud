@@ -1,0 +1,11 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "floor2cloud",
+  "version-semver": "0.1.0",
+  "description": "Reference IIoT platform: shop floor to cloud",
+  "license": "MIT",
+  "builtin-baseline": "bf19794383e8fb95eba5aa553235bc8ec2271688",
+  "dependencies": [
+    "catch2"
+  ]
+}
