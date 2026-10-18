@@ -1,0 +1,102 @@
+# Milestone 1 CI (spec § 9.5): formatting, build + unit tests on GCC and Clang, sanitizers and
+# static analysis. The `integration` job arrives with task 18.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # vcpkg is checked out at the manifest's builtin-baseline, so the tool and the port versions
+  # match what developers resolve locally.
+  VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+  VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/vcpkg-binary-cache,readwrite
+  VCPKG_DISABLE_METRICS: "1"
+
+jobs:
+  format:
+    name: format
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check formatting
+        run: |
+          clang-format-18 --version
+          git ls-files -z '*.cpp' '*.hpp' '*.h' \
+            | xargs -0 --no-run-if-empty clang-format-18 --dry-run -Werror
+
+  build-test:
+    name: build-test (${{ matrix.compiler }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: gcc-13
+            preset: ci-gcc
+          - compiler: clang-18
+            preset: ci-clang
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-vcpkg
+        with:
+          cache-key: ${{ matrix.preset }}
+
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}
+
+      - name: Unit tests
+        run: ctest --preset ${{ matrix.preset }} -L unit
+
+  asan:
+    name: asan
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-vcpkg
+        with:
+          cache-key: asan
+
+      - name: Configure
+        run: cmake --preset asan
+
+      - name: Build
+        run: cmake --build --preset asan
+
+      - name: Unit tests
+        run: ctest --preset asan -L unit
+
+  clang-tidy:
+    name: clang-tidy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-vcpkg
+        with:
+          cache-key: ci-clang
+
+      # Configuring is enough: it installs the dependencies and writes compile_commands.json.
+      - name: Configure
+        run: cmake --preset ci-clang
+
+      # Warnings are errors through `WarningsAsErrors` in .clang-tidy; run-clang-tidy fails if any
+      # file does.
+      - name: Run clang-tidy
+        run: |
+          clang-tidy-18 --version
+          run-clang-tidy-18 -p build/ci-clang -quiet
