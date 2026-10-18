@@ -1,0 +1,12 @@
+f2c_add_test_executable(f2c_core_tests
+    SOURCES
+        backoff_test.cpp
+        clock_test.cpp
+        error_test.cpp
+        tag_path_test.cpp
+        tag_sample_test.cpp
+        timestamp_test.cpp
+    LIBRARIES
+        f2c::core
+        f2c::core_testing
+)

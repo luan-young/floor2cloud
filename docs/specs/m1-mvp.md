@@ -167,13 +167,14 @@ The headers below are the public contract of each library. They are complete eno
 ```cpp
 // f2c/core/error.hpp
 #pragma once
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <tl/expected.hpp>   // see ADR-0011; becomes std::expected when we move to C++23
 
 namespace f2c::core {
 
-enum class Errc {
+enum class Errc : std::uint8_t {
     invalid_argument,  // malformed input: tag path, payload field, config value
     parse_error,       // syntax error: YAML, JSON, timestamp
     not_found,         // unknown driver type, missing file
@@ -183,7 +184,7 @@ enum class Errc {
     unavailable,       // dependency not reachable (broker, database)
 };
 
-std::string_view to_string(Errc code) noexcept;
+[[nodiscard]] std::string_view to_string(Errc code) noexcept;
 
 struct Error {
     Errc code;
@@ -209,6 +210,9 @@ using Expected = tl::expected<T, Error>;
 #include "f2c/core/error.hpp"
 
 namespace f2c::core {
+
+inline constexpr std::size_t max_tag_path_depth = 16;
+inline constexpr std::size_t max_segment_length = 64;
 
 // ISA-95 address: site/area/line/cell/equipment/tag, slash-separated.
 // Invariants (checked on construction):
@@ -260,7 +264,9 @@ using Timestamp = std::chrono::sys_time<std::chrono::nanoseconds>;  // always UT
 // "2026-10-20T13:05:01.120Z": exactly three fractional digits, 'Z' suffix, truncated (floor) to ms.
 [[nodiscard]] std::string format_rfc3339_ms(Timestamp t);
 
-// Accepts RFC 3339 with 'Z' or a ±hh:mm offset and 0 to 9 fractional digits.
+// Accepts RFC 3339 with 'Z' or a ±hh:mm offset and 0 to 9 fractional digits. The 'T' and 'Z'
+// separators may be lowercase, as RFC 3339 allows. Leap seconds (":60") are rejected: Timestamp
+// cannot represent them.
 [[nodiscard]] Expected<Timestamp> parse_rfc3339(std::string_view text);
 
 } // namespace f2c::core
@@ -280,7 +286,7 @@ namespace f2c::core {
 // std::monostate = "no value": a bad-quality sample of a tag that has never been read.
 using Value = std::variant<std::monostate, bool, std::int64_t, double, std::string>;
 
-enum class Quality { good, uncertain, bad };  // M1 drivers emit only good and bad
+enum class Quality : std::uint8_t { good, uncertain, bad };  // M1 drivers emit only good and bad
 
 [[nodiscard]] std::string_view to_string(Quality q) noexcept;           // "good" | "uncertain" | "bad"
 [[nodiscard]] Expected<Quality> parse_quality(std::string_view text);
@@ -307,26 +313,35 @@ struct TagSample {
 namespace f2c::core {
 
 // Injected wherever code needs "now", so tests can control time (NF-5).
+// Not copyable or movable: always passed by reference.
 class Clock {
 public:
+    Clock() = default;
+    Clock(const Clock&) = delete;
+    Clock& operator=(const Clock&) = delete;
+    Clock(Clock&&) = delete;
+    Clock& operator=(Clock&&) = delete;
     virtual ~Clock() = default;
     [[nodiscard]] virtual Timestamp now() const = 0;                                // wall clock, for timestamps
     [[nodiscard]] virtual std::chrono::steady_clock::time_point steady_now() const = 0;  // for scheduling
 };
 
+// The process-wide real clock: std::chrono::system_clock and std::chrono::steady_clock.
 [[nodiscard]] const Clock& system_clock() noexcept;
 
 } // namespace f2c::core
 
-// f2c/core/testing/manual_clock.hpp   (target f2c::core_testing, linked only by tests)
+// f2c/core/testing/manual_clock.hpp   (target f2c::core_testing, linked only by tests;
+// lives in libs/core/testing/ so production code cannot include it)
 namespace f2c::core::testing {
 
+// Only moves when told to. Not thread-safe: tests advance it from the thread that reads it.
 class ManualClock final : public Clock {
 public:
     explicit ManualClock(Timestamp start = Timestamp{});
     Timestamp now() const override;
     std::chrono::steady_clock::time_point steady_now() const override;
-    void advance(std::chrono::nanoseconds d);  // moves both clocks
+    void advance(std::chrono::nanoseconds d);  // moves both clocks; d >= 0 (asserted)
     // …
 };
 
@@ -349,6 +364,7 @@ struct BackoffPolicy {
 // Deterministic bounded exponential backoff (no jitter in M1: a single gateway, see ADR-0010).
 class Backoff {
 public:
+    // Preconditions (asserted): 0 <= initial <= max, multiplier >= 1.0.
     explicit Backoff(BackoffPolicy policy);
     [[nodiscard]] std::chrono::milliseconds next_delay();  // initial, initial*m, …, capped at max
     void reset() noexcept;
@@ -1235,9 +1251,9 @@ Exit codes: 0 clean shutdown, 1 configuration error, 2 fatal runtime error. Logs
 **core** (`[core]`)
 
 - TagPath: accepts the plan's example; rejects empty string, empty segment (`a//b`, leading/trailing `/`), uppercase, `+`, `#`, spaces, segment starting with `_`, segment of 65 chars, 17 segments; `append`/`join` keep invariants; equality, ordering, hashing.
-- Timestamp: format truncates to ms (`.1209999` → `.120`); format of epoch; parse `Z`, `+02:00`, 0 and 9 fractional digits; round-trip at ms precision; rejects missing `T`, bad month, garbage.
+- Timestamp: format truncates to ms (`.1209999` → `.120`); format of epoch and of a pre-epoch instant; parse `Z`, `+02:00`, a negative offset crossing midnight, lowercase `t`/`z`, leap day, 0, 1 and 9 fractional digits; round-trip at ms precision; rejects missing `T`, bad month, invalid day (Feb 30, Feb 29 in a non-leap year), out-of-range time and offset, leap second, empty or 10-digit fraction, trailing characters, garbage.
 - Quality: to_string/parse round-trip; unknown string → error.
-- Backoff: sequence 500, 1000, 2000, …, capped at max; reset; multiplier 1.0 → constant.
+- Backoff: sequence 500, 1000, 2000, …, capped at max; reset; multiplier 1.0 → constant; fractional multiplier; initial = max → constant.
 - ManualClock: `advance` moves both clocks.
 
 **config** (`[config]`)
