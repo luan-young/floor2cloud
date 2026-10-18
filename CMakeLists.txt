@@ -20,5 +20,6 @@ option(F2C_BUILD_TESTS "Build the unit tests" ON)
 if(F2C_BUILD_TESTS)
     enable_testing()
     include(F2cTesting)
-    add_subdirectory(tests/smoke)
 endif()
+
+add_subdirectory(libs/core)

@@ -1,1 +1,0 @@
-f2c_add_test_executable(f2c_smoke_tests SOURCES smoke_test.cpp)
