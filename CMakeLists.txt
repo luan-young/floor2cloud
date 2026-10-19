@@ -23,3 +23,4 @@ if(F2C_BUILD_TESTS)
 endif()
 
 add_subdirectory(libs/core)
+add_subdirectory(libs/config)
