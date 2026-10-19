@@ -1,0 +1,28 @@
+# Milestone 1 demo plant: one simulated filling machine (spec § 5.1, register map § 2.1.1).
+site: plant1
+
+mqtt:
+  uri: tcp://mosquitto:1883
+  client_id: gateway-01
+  qos: 1
+  keepalive_s: 10
+  heartbeat_s: 30
+
+devices:
+  - id: filler
+    path: production/line1/cell-c/filler
+    driver:
+      type: modbus-tcp
+      host: modbus-machine
+      port: 502
+      unit_id: 1
+      timeout_ms: 500
+      reconnect: { initial_ms: 500, max_ms: 10000 }
+    scan_ms: 1000
+    tags:
+      - { name: counter,        area: holding, address: 0, type: uint32 }
+      - { name: speed,          area: holding, address: 2, type: uint16 }
+      - { name: speed_setpoint, area: holding, address: 3, type: uint16 }
+      - { name: state,          area: holding, address: 4, type: uint16 }
+      - { name: temperature,    area: input,   address: 0, type: int16, scale: 0.1 }
+      - { name: in_fault,       area: coil,    address: 0, type: bool }

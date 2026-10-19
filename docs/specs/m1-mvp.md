@@ -396,10 +396,10 @@ struct MqttConfig {
     std::chrono::seconds heartbeat{30};      // 0 disables
 };
 
-enum class ModbusArea { coil, discrete_input, holding, input };
-enum class ModbusType { boolean, int16, uint16, int32, uint32, float32 };
-enum class ByteOrder { big, little };        // bytes inside each 16-bit register
-enum class WordOrder { big, little };        // register order of 32-bit values (big = high word first)
+enum class ModbusArea : std::uint8_t { coil, discrete_input, holding, input };
+enum class ModbusType : std::uint8_t { boolean, int16, uint16, int32, uint32, float32 };
+enum class ByteOrder : std::uint8_t { big, little };  // bytes inside each 16-bit register
+enum class WordOrder : std::uint8_t { big, little };  // register order of 32-bit values (big = high word first)
 
 struct ModbusTcpConfig {
     std::string host;
@@ -465,18 +465,25 @@ struct PlantConfig {
 namespace f2c::config {
 
 struct ConfigError {
-    std::string location;   // "config/plant1.yaml:14:9" (empty if not tied to a node)
-    std::string key_path;   // "devices[0].tags[2].type"
+    std::string location;   // "config/plant1.yaml:14:9"; the file alone if not tied to a node
+    std::string key_path;   // "devices[0].tags[2].type"; empty for the whole document
     std::string message;    // "unknown type 'uint64'; expected one of: bool, int16, uint16, int32, uint32, float32"
 };
 
-// All errors are collected; loading never stops at the first one.
-using LoadResult = tl::expected<PlantConfig, std::vector<ConfigError>>;
+// A valid configuration, plus findings that do not prevent loading (e.g. timeout >= scan period).
+struct LoadedConfig {
+    PlantConfig plant;
+    std::vector<ConfigError> warnings;
+};
+
+// All errors are collected; loading never stops at the first one. Never throws.
+using LoadResult = tl::expected<LoadedConfig, std::vector<ConfigError>>;
 
 [[nodiscard]] LoadResult load_plant_config(const std::filesystem::path& file);
 [[nodiscard]] LoadResult parse_plant_config(std::string_view yaml, std::string_view source_name = "<string>");
 
-[[nodiscard]] std::string format_errors(std::span<const ConfigError> errors);  // one per line
+// One "<location>: <key path>: <message>" line per error; empty parts are left out.
+[[nodiscard]] std::string format_errors(std::span<const ConfigError> errors);
 
 } // namespace f2c::config
 ```
@@ -1074,7 +1081,11 @@ This produces three requests per scan: holding 0–4 (5 registers), input 0 (1),
 
 Validation rules beyond the table:
 
-- **Unknown keys are errors**, with a "did you mean" suggestion when the edit distance is ≤ 2 (`scan_mss` → `scan_ms`). Typos must not silently fall back to defaults.
+- **Unknown keys are errors**, with a "did you mean" suggestion when the edit distance is ≤ 2 (`scan_mss` → `scan_ms`). Typos must not silently fall back to defaults. A misspelled required key is reported once (as unknown, with the suggestion), not also as missing.
+- A key given twice in the same mapping is an error.
+- Integers and numbers must be plain YAML scalars: `port: "502"` (quoted) is a type error. A leading `+` is accepted.
+- When `driver.type` is missing or unknown, the driver's other keys and the tags' driver-specific keys (`area`, `address`, …) are not checked: the type error is the one to fix.
+- Warnings (currently only `timeout_ms` ≥ smallest scan period) do not prevent loading; they are returned in `LoadedConfig::warnings` with the same location format.
 - All errors are reported in one run, each as `<file>:<line>:<col>: <key path>: <message>`.
 - Overlapping tags at the same address are allowed (e.g. a uint32 and its low word as uint16).
 - Byte/word order semantics, for a 32-bit value `0xAABBCCDD` stored in registers R0, R1: big/big = `AABB CCDD` ("ABCD"), big/little = `CCDD AABB` ("CDAB"), little/big = `BBAA DDCC` ("BADC"), little/little = `DDCC BBAA` ("DCBA").
