@@ -154,7 +154,7 @@ deploy/{compose,db,grafana,docker}/
 tests/integration/
 ```
 
-Each library: `include/f2c/<lib>/…`, `src/`, `tests/`. One Catch2 executable per library (`f2c_<lib>_tests`), registered with `catch_discover_tests`, CTest label `unit`. Integration tests are a pytest suite in `tests/integration/` (ADR-0012), outside CTest.
+Each library: `include/f2c/<lib>/…`, `src/`, `tests/`. One Catch2 executable per library (`f2c_<lib>_tests`), registered with `catch_discover_tests`, CTest label `unit`; component tests, where a library has them, in `f2c_<lib>_component_tests` (label `component`, see § 9.1). Integration tests are a pytest suite in `tests/integration/` (ADR-0012), outside CTest.
 
 Library dependencies (no cycles): `core` ← `config` ← `drivers` ← `drivers_modbus`; `core` ← `messaging`; `core` ← `storage`. `messaging` and `storage` do not depend on `config` beyond plain option structs they define themselves; services translate.
 
@@ -987,7 +987,7 @@ public:
 // simulators/modbus-machine/src/filler_model.hpp
 namespace f2c::sim {
 
-enum class MachineState : std::uint16_t { stopped = 0, running = 1, faulted = 2 };
+enum class MachineState : std::uint8_t { stopped = 0, running = 1, faulted = 2 };
 
 struct FillerOutputs {
     std::uint32_t counter;
@@ -1003,6 +1003,7 @@ public:
     explicit FillerModel(std::uint32_t seed);
     void set_speed_setpoint(std::uint16_t bpm);  // clamped to 0..300
     void set_fault(bool forced);
+    void set_counter(std::uint32_t counter);     // start from a given count (tests the 2³² wrap)
     void step(std::chrono::milliseconds dt);
     [[nodiscard]] FillerOutputs outputs() const;
     // …
@@ -1011,7 +1012,51 @@ public:
 } // namespace f2c::sim
 ```
 
-The server loop (`main.cpp`) owns a `modbus_mapping_t`; on each `select` timeout or request it applies client writes to the model (`set_speed_setpoint`, `set_fault`), steps it and writes the outputs back into the mapping.
+```cpp
+// simulators/modbus-machine/src/register_map.hpp
+namespace f2c::sim {
+
+struct RegisterImage {                       // the § 2.1.1 tables, host order
+    std::array<std::uint16_t, 5> holding{};
+    std::array<std::uint16_t, 1> input{};
+    std::array<std::uint8_t, 1> coils{};
+};
+
+[[nodiscard]] RegisterImage to_registers(const FillerOutputs& outputs);
+// Forwards the writable entries (holding 3, coil 0) of `current` that differ from `published`.
+void apply_client_writes(FillerModel& model, const RegisterImage& current,
+                         const RegisterImage& published);
+
+} // namespace f2c::sim
+```
+
+```cpp
+// simulators/modbus-machine/src/options.hpp, server.hpp
+namespace f2c::sim {
+
+struct SimulatorOptions {
+    std::string bind_address{"0.0.0.0"};
+    std::uint16_t port{502};
+    std::chrono::milliseconds step_period{100};
+    std::optional<std::uint32_t> seed;                // none: random, logged at startup
+    std::optional<std::filesystem::path> health_file;
+    std::string log_level{"info"};
+    bool help{false};
+};
+
+[[nodiscard]] core::Expected<SimulatorOptions> parse_options(std::span<const std::string_view> args);
+
+// `listening` gets the bound port (port 0 picks an ephemeral one) before the first request.
+[[nodiscard]] core::Expected<void>
+run_server(const SimulatorOptions& options, std::uint32_t seed, const std::atomic<bool>& stop,
+           const std::function<void(std::uint16_t port)>& listening = {});
+
+} // namespace f2c::sim
+```
+
+Targets: `f2c::sim` (model, register image, CLI parsing; pure, unit-tested), `f2c::sim_server` (the libmodbus loop, linkable so task 9's smoke test can run the simulator in-process) and the `f2c-modbus-machine` executable (`--bind`, `--port`, `--step-ms`, `--seed`, `--health-file`, `--log-level`).
+
+`run_server` owns a `modbus_mapping_t` and runs a single-threaded `select` loop over the listening socket and every client (up to 32). The model is stepped every `step_period` (missed steps are skipped, not replayed). After each request it applies client writes to the model (`apply_client_writes`) and writes the outputs back into the mapping at once, so a write to a read-only register is overwritten before the next request. A client that stalls mid-request for 1 s is dropped. SIGINT/SIGTERM set the `stop` flag; `select` returns with `EINTR` and the loop exits. `select` never waits more than 100 ms, so `stop` set from another thread (an in-process test) is seen promptly too.
 
 ## 5. Plant configuration
 
@@ -1246,6 +1291,7 @@ Exit codes: 0 clean shutdown, 1 configuration error, 2 fatal runtime error. Logs
 - `CMakePresets.json`: `dev` (Debug, default compiler), `release`, `asan` (Clang, ASan + UBSan), `ci-gcc`, `ci-clang`. Toolchain from `$env{VCPKG_ROOT}`.
 - `vcpkg.json` with a pinned `builtin-baseline`: asio, tl-expected, spdlog, yaml-cpp, libmodbus, paho-mqttpp3, nlohmann-json, libpqxx, catch2, trompeloeil.
 - Warnings as errors on every target through a shared `f2c_warnings` interface target.
+- vcpkg builds libmodbus with autotools, so the build host needs `autoconf autoconf-archive automake libtool` from the system package manager (CI and the Docker builder install them).
 
 ## 9. Test plan
 
@@ -1254,7 +1300,10 @@ Exit codes: 0 clean shutdown, 1 configuration error, 2 fatal runtime error. Logs
 - **TDD** per task: each test below is written before the code that passes it.
 - **Unit tests** (Catch2 v3, label `unit`) cover the pure cores exhaustively. No network, no Docker, no `sleep`: time comes from `core::testing::ManualClock` or explicit `now` arguments.
 - **Test doubles**: hand-written fakes for stateful collaborators (`FakeModbusClient` with a register map and failure injection, `FakeSampleWriter`, `FakeMqttClient` recording publishes); trompeloeil mocks where the interaction itself is the assertion (e.g. "publishes exactly once with retain = true").
-- **Shells** (`ModbusDriver`, `SamplePublisher`, `PahoMqttClient`, `PgSampleWriter`, `HistorianPipeline`) are covered by the integration test plus a few local smoke tests where cheap (e.g. `LibmodbusClient` against the simulator running in-process on a loopback port, label `local`).
+- **Shells** (`ModbusDriver`, `SamplePublisher`, `PahoMqttClient`, `PgSampleWriter`, `HistorianPipeline`) are covered by the integration test plus a few cheap tests against the real library:
+  - **Component tests** (label `component`, run in CI): everything inside the test process, e.g. the simulator server or `LibmodbusClient` against the simulator running in-process on an ephemeral loopback port. They check only what unit tests cannot (wiring, wire format, connection handling), never the pure logic again. They may poll with a deadline, never a bare sleep.
+  - **Local smoke tests** (label `local`, run by hand): need a service outside the test process, e.g. `PgSampleWriter` against a local TimescaleDB.
+- See [ADR-0003](../adr/0003-catch2-trompeloeil.md) for the labels.
 - **Integration tests** (pytest, ADR-0012) run against the Compose stack; they map one-to-one to the acceptance criteria.
 
 ### 9.2 Unit tests
@@ -1311,10 +1360,22 @@ Exit codes: 0 clean shutdown, 1 configuration error, 2 fatal runtime error. Logs
 
 - FillerModel: initial state running toward 120 bpm; speed ramps at 10 bpm/s; counter integrates speed (120 bpm for 60 s → 120 ± 1); setpoint 0 → stopped; fault → speed 0, state faulted, counter frozen; clearing fault resumes; temperature stays within plausible bounds and same seed → same sequence; setpoint clamped to 300.
 
-### 9.3 Process-level tests (label `unit`, no Docker)
+### 9.3 Process-level and component tests (no Docker)
+
+Process-level (label `unit`):
+
 
 - `f2c-gateway --config <invalid file>` exits 1 and prints all errors (CTest with `PASS_REGULAR_EXPRESSION`).
 - `f2c-historian-writer` with `F2C_BATCH_MAX_SAMPLES=abc` exits 1 naming the variable.
+
+Component (label `component`, `[sim][server]`): `run_server` on an ephemeral loopback port, driven by a libmodbus client, with a 60 s step period so the model does not move during a test:
+
+- reports the bound port; serves holding 0–4, input 0 and coil 0 with the initial values;
+- a setpoint write reaches the model (and is clamped to 300); writes to read-only registers are overwritten at once;
+- the fault coil sets and clears state `faulted`;
+- an address outside the map → exception "illegal data address", connection kept;
+- two interleaved clients see each other's writes; a new client is served after another disconnects;
+- touches the health file; stops within 1 s of `stop` with a client connected; port in use → `io_error`.
 
 ### 9.4 Integration tests (`tests/integration`, pytest)
 
@@ -1350,8 +1411,8 @@ Criterion 6 (green CI) is the CI pipeline itself.
 | Job | Content |
 | --- | --- |
 | `format` | `clang-format --dry-run -Werror` on all C++ files |
-| `build-test` (matrix gcc-13, clang-18) | configure with `ci-gcc`/`ci-clang`, build, `ctest -L unit` |
-| `asan` | `asan` preset, `ctest -L unit` |
+| `build-test` (matrix gcc-13, clang-18) | configure with `ci-gcc`/`ci-clang`, build, `ctest -L unit`, `ctest -L component` |
+| `asan` | `asan` preset, `ctest -L unit`, `ctest -L component` |
 | `clang-tidy` | `clang-tidy` with the project `.clang-tidy`, warnings as errors, using the clang build's `compile_commands.json` |
 | `integration` | `actions/setup-python` 3.12, `pip install -r tests/integration/requirements.txt`, `pytest tests/integration --junitxml=…` on `ubuntu-24.04` (needs `build-test`) |
 
@@ -1402,7 +1463,7 @@ One task per pull request, tests first. Each task leaves `main` green.
 | 2 | CI: `format`, `build-test` matrix, `asan`, `clang-tidy` jobs | 1 | Green on a PR |
 | 3 | `libs/core`: Error, TagPath, Timestamp, TagSample, Quality, Clock + ManualClock, Backoff | 1 | § 9.2 core tests pass |
 | 4 | `libs/config`: structs, YAML loader, validation, error formatting, `config/plant1.yaml` | 3 | § 9.2 config tests pass |
-| 5 | `simulators/modbus-machine`: FillerModel (tests first), libmodbus server, Dockerfile target | 1 | Model tests pass; `mbpoll`/libmodbus client reads the register map from the container |
+| 5 | `simulators/modbus-machine`: FillerModel (tests first), libmodbus server, Dockerfile target | 1 | Model and component tests pass; `mbpoll`/libmodbus client reads the register map from the container |
 | 6 | `libs/drivers`: Driver, DriverRegistry | 4 | Registry tests pass |
 | 7 | `libs/drivers/modbus` part 1: `plan_scan_groups`, `decode_*` | 6 | Plan and decode tests pass |
 | 8 | `libs/drivers/modbus` part 2: `ModbusClient`, `FakeModbusClient`, `Poller` | 7 | Poller tests pass |

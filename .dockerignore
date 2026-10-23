@@ -1,0 +1,13 @@
+# Keep the build context small: the builder stage only needs the sources.
+.git
+.github
+.cache
+.vscode
+.idea
+build
+out
+vcpkg_installed
+docs
+tests/integration
+**/__pycache__
+**/.venv
