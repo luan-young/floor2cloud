@@ -11,6 +11,13 @@ inputs:
 runs:
   using: composite
   steps:
+    # libmodbus is built with autotools by vcpkg (vcpkg-make), which needs these from the system.
+    - name: Install build tools for autotools ports
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends autoconf autoconf-archive automake libtool
+
     - name: Read the vcpkg baseline
       id: baseline
       shell: bash

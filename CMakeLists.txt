@@ -24,3 +24,4 @@ endif()
 
 add_subdirectory(libs/core)
 add_subdirectory(libs/config)
+add_subdirectory(simulators/modbus-machine)
