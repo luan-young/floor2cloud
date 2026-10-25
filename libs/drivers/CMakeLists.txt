@@ -12,3 +12,5 @@ target_link_libraries(f2c_drivers PUBLIC f2c::config asio::asio PRIVATE f2c::war
 if(F2C_BUILD_TESTS)
     add_subdirectory(tests)
 endif()
+
+add_subdirectory(modbus)
