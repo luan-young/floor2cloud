@@ -1,7 +1,8 @@
 # f2c::sim: simulated filling machine served over Modbus TCP (spec § 2.1, § 4.7).
 # libmodbus ships a pkg-config module; vcpkg's CMake config for it is unofficial and warns.
+# GLOBAL, like libs/drivers/modbus: whichever runs first creates the target for both.
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(libmodbus REQUIRED IMPORTED_TARGET libmodbus)
+pkg_check_modules(libmodbus REQUIRED IMPORTED_TARGET GLOBAL libmodbus)
 find_package(spdlog CONFIG REQUIRED)
 
 # Pure part (model, register image, CLI parsing): no I/O, unit-tested.

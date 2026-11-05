@@ -4,6 +4,7 @@
 #include "f2c/core/error.hpp"
 
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace f2c::drivers::modbus {
@@ -32,5 +33,10 @@ public:
     virtual core::Expected<std::vector<std::uint16_t>>
     read_registers(config::ModbusArea area, std::uint16_t address, std::uint16_t count) = 0;
 };
+
+// libmodbus-backed implementation (sets the response timeout from the config). Resolves `host`
+// on every connect(); no I/O before that.
+[[nodiscard]] std::unique_ptr<ModbusClient>
+make_libmodbus_client(const config::ModbusTcpConfig& cfg);
 
 } // namespace f2c::drivers::modbus
