@@ -752,11 +752,11 @@ inline constexpr std::string_view topic_prefix = "f2c/v1";
 
 namespace f2c::messaging {
 
-// Payload format in spec § 6.2.
+// Payload format in spec § 6.2. A non-finite double (NaN, ±inf) has no JSON form: written as null.
 [[nodiscard]] std::string encode_sample(const core::TagSample& sample);
 [[nodiscard]] core::Expected<core::TagSample> decode_sample(core::TagPath path, std::string_view payload);
 
-enum class GatewayState { online, offline };
+enum class GatewayState : std::uint8_t { online, offline };
 // {"state":"online","ts":"…","version":"0.1.0"}; ts omitted when nullopt (the last will).
 [[nodiscard]] std::string encode_status(GatewayState state, std::optional<core::Timestamp> ts);
 
@@ -837,19 +837,21 @@ namespace f2c::messaging {
 // Publish-on-change with a per-tag heartbeat. Pure, single-threaded.
 class ChangeFilter {
 public:
-    using time_point = std::chrono::steady_clock::time_point;
+    using TimePoint = std::chrono::steady_clock::time_point;
 
     explicit ChangeFilter(std::chrono::seconds heartbeat);  // 0 disables heartbeats
 
     // Records the sample as the tag's latest. Returns true (and marks it published at `now`)
     // if it is the tag's first sample or its value or quality differs from the last published one.
     // Values compare exactly (no deadband in M1).
-    bool offer(const core::TagSample& sample, time_point now);
+    bool offer(const core::TagSample& sample, TimePoint now);
 
-    // Latest sample of every tag whose last publish is at least `heartbeat` old; marks them published.
-    std::vector<core::TagSample> take_heartbeats(time_point now);
+    // Latest sample of every tag whose last publish is at least `heartbeat` old, ordered by path;
+    // marks them published.
+    std::vector<core::TagSample> take_heartbeats(TimePoint now);
 
-    [[nodiscard]] std::optional<time_point> next_heartbeat() const;
+    // When the earliest heartbeat is due; empty if heartbeats are disabled or no tag was offered.
+    [[nodiscard]] std::optional<TimePoint> next_heartbeat() const;
     // …
 };
 
@@ -1179,7 +1181,7 @@ Examples:
 
 Rules:
 
-- Encoders always write a `double` with a fraction or exponent (`42.0`, never `42`), so the type round-trips.
+- Encoders always write a `double` with a fraction or exponent (`42.0`, never `42`), so the type round-trips. A non-finite `double` (NaN, ±inf) has no JSON form and is written as `null`.
 - Decoders ignore unknown keys (forward compatibility) and reject: missing `v`/`q`/`ts`/`gts`, integers outside int64, unknown quality strings, malformed timestamps, non-object payloads.
 - A `bad` sample carries the last known value if there is one, else `null`.
 
@@ -1352,8 +1354,8 @@ Exit codes: 0 clean shutdown, 1 configuration error, 2 fatal runtime error. Logs
 **messaging** (`[messaging]`)
 
 - Topic: `tag_topic` of the example; `tag_path_from_topic` round-trip; wrong prefix, wrong version, empty → error; `is_system_topic` for status topic; status topic format.
-- JSON codec: encode each value type (incl. `double 42.0` → `42.0`, `monostate` → `null`); decode each; round-trip; unknown keys ignored; every rejection rule in § 6.2; status encoding with and without `ts`.
-- ChangeFilter: first sample published; same value and quality suppressed; value change published; quality change with same value published; heartbeat returns the latest (not last-published) sample after the interval and not before; heartbeat 0 → never; `next_heartbeat`; independent tags don't interfere.
+- JSON codec: encode each value type (incl. `double 42.0` → `42.0`, `monostate` → `null`, NaN/±inf → `null`); decode each; round-trip; unknown keys ignored; every rejection rule in § 6.2; status encoding with and without `ts`.
+- ChangeFilter: first sample published; same value and quality suppressed; value change published; quality change with same value published; heartbeat returns the latest (not last-published) sample after the interval and not before; heartbeat 0 → never; `next_heartbeat`; independent tags don't interfere; heartbeats ordered by path.
 - SamplePublisher (with `FakeMqttClient`, `asio::io_context` run manually): `submit` from another thread ends up published on the executor; `gateway_time` stamped from the clock; topic, QoS and payload correct; suppressed duplicates not published.
 
 **storage** (`[storage]`)

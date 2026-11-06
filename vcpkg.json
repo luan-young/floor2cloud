@@ -9,6 +9,7 @@
     "asio",
     "catch2",
     "libmodbus",
+    "nlohmann-json",
     "spdlog",
     "tl-expected",
     "yaml-cpp"
