@@ -38,11 +38,12 @@ Poller::Result Poller::poll() {
         if (clock_->steady_now() < retry_at_) {
             return {.samples = {}, .next_wakeup = retry_at_};
         }
-        if (!client_->connect()) {
-            return fail_connection();
+        if (auto connected = client_->connect(); !connected) {
+            return fail_connection(std::move(connected).error());
         }
         backoff_.reset();
         outage_reported_ = false;
+        connection_error_.reset();
         std::ranges::fill(due_, clock_->steady_now());
     }
 
@@ -52,8 +53,8 @@ Poller::Result Poller::poll() {
             continue;
         }
         for (const auto& block : groups_[g].blocks) {
-            if (!read_block(block, samples)) {
-                return fail_connection();
+            if (auto read = read_block(block, samples); !read) {
+                return fail_connection(std::move(read).error());
             }
         }
         const auto period = groups_[g].period;
@@ -69,7 +70,12 @@ bool Poller::connected() const noexcept {
     return client_->connected();
 }
 
-bool Poller::read_block(const ReadBlock& block, std::vector<core::TagSample>& samples) {
+const std::optional<core::Error>& Poller::connection_error() const noexcept {
+    return connection_error_;
+}
+
+core::Expected<void> Poller::read_block(const ReadBlock& block,
+                                        std::vector<core::TagSample>& samples) {
     const auto emit_bad = [&] {
         const auto now = clock_->now();
         for (const auto i : block.tags) {
@@ -81,10 +87,10 @@ bool Poller::read_block(const ReadBlock& block, std::vector<core::TagSample>& sa
         auto bits = client_->read_bits(block.area, block.start, block.count);
         if (!bits) {
             if (connection_lost(bits.error())) {
-                return false;
+                return tl::unexpected(std::move(bits).error());
             }
             emit_bad();
-            return true;
+            return {};
         }
         assert(bits->size() == block.count);
         const auto now = clock_->now();
@@ -93,16 +99,16 @@ bool Poller::read_block(const ReadBlock& block, std::vector<core::TagSample>& sa
             last_values_[i] = decode_bit((*bits)[address.address - block.start]);
             samples.push_back(sample(i, last_values_[i], core::Quality::good, now));
         }
-        return true;
+        return {};
     }
 
     auto registers = client_->read_registers(block.area, block.start, block.count);
     if (!registers) {
         if (connection_lost(registers.error())) {
-            return false;
+            return tl::unexpected(std::move(registers).error());
         }
         emit_bad();
-        return true;
+        return {};
     }
     assert(registers->size() == block.count);
     const auto now = clock_->now();
@@ -119,10 +125,11 @@ bool Poller::read_block(const ReadBlock& block, std::vector<core::TagSample>& sa
         last_values_[i] = *std::move(value);
         samples.push_back(sample(i, last_values_[i], core::Quality::good, now));
     }
-    return true;
+    return {};
 }
 
-Poller::Result Poller::fail_connection() {
+Poller::Result Poller::fail_connection(core::Error error) {
+    connection_error_ = std::move(error);
     if (client_->connected()) {
         client_->close();
     }

@@ -682,6 +682,10 @@ public:
     Result poll();
 
     [[nodiscard]] bool connected() const noexcept;
+
+    // Why the connection is down (failed connect, or I/O error or timeout on a read); empty while
+    // connected. Modbus exception responses do not count. The shell logs it (GW-13).
+    [[nodiscard]] const std::optional<core::Error>& connection_error() const noexcept;
     // …
 };
 
@@ -699,9 +703,11 @@ public:
 namespace f2c::drivers::modbus {
 
 // Thin shell: a steady_timer on the executor calls Poller::poll() and re-arms at next_wakeup.
+// State: connecting until the first poll, then running while connected, faulted while not.
+// The executor must keep running handlers until stop() returns; the destructor calls stop().
 class ModbusDriver final : public Driver {
 public:
-    ModbusDriver(asio::any_io_executor executor,
+    ModbusDriver(const asio::any_io_executor& executor,
                  config::DeviceConfig device,
                  std::unique_ptr<ModbusClient> client,
                  const core::Clock& clock = core::system_clock());
@@ -1377,6 +1383,11 @@ Component (label `component`, `[sim][server]`): `run_server` on an ephemeral loo
 - two interleaved clients see each other's writes; a new client is served after another disconnects;
 - touches the health file; stops within 1 s of `stop` with a client connected; port in use → `io_error`.
 
+Component (label `component`, `[modbus][component]`): `LibmodbusClient` and `ModbusDriver` against `run_server` in-process on an ephemeral loopback port:
+
+- `LibmodbusClient` reads holding, input and coil values of the register map; resolves `localhost`; an address outside the map → `protocol_error`, connection kept; a closed port → `io_error`; a socket that accepts but never answers → `timeout` after the response timeout; a stopped server → `io_error` or `timeout`.
+- `ModbusDriver` hands good samples for every tag to the sink and reports `running`; with nothing listening, every tag `bad` and `faulted`; `stop` is idempotent, allowed before `start`, and no sink call follows it; destroying a running driver is safe (checked under ASan).
+
 ### 9.4 Integration tests (`tests/integration`, pytest)
 
 A Python 3.12 pytest suite ([ADR-0012](../adr/0012-integration-tests-pytest.md)), black-box against the Compose stack:
@@ -1467,7 +1478,7 @@ One task per pull request, tests first. Each task leaves `main` green.
 | 6 | `libs/drivers`: Driver, DriverRegistry | 4 | Registry tests pass |
 | 7 | `libs/drivers/modbus` part 1: `plan_scan_groups`, `decode_*` | 6 | Plan and decode tests pass |
 | 8 | `libs/drivers/modbus` part 2: `ModbusClient`, `FakeModbusClient`, `Poller` | 7 | Poller tests pass |
-| 9 | `libs/drivers/modbus` part 3: `LibmodbusClient`, `ModbusDriver` shell, `register_modbus_tcp` | 8, 5 | Local smoke test against the in-process simulator |
+| 9 | `libs/drivers/modbus` part 3: `LibmodbusClient`, `ModbusDriver` shell, `register_modbus_tcp` | 8, 5 | Component tests against the in-process simulator (§ 9.3) |
 | 10 | `libs/messaging` part 1: topic, JSON codec, ChangeFilter | 3 | Tests pass |
 | 11 | `libs/messaging` part 2: `MqttClient`, `PahoMqttClient`, `SamplePublisher` | 10 | SamplePublisher tests pass; manual check against a local Mosquitto |
 | 12 | `services/gateway`: CLI, config load, registry, drivers, publisher, status + will, signals, health file, logging | 9, 11 | Process-level config test passes; runs against simulator + Mosquitto and `mosquitto_sub` shows the contract |

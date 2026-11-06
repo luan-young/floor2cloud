@@ -99,6 +99,11 @@ bool all_good(const std::vector<TagSample>& samples) {
                                [](const TagSample& s) { return s.quality == Quality::good; });
 }
 
+std::optional<Errc> connection_errc(const Poller& poller) {
+    const auto& error = poller.connection_error();
+    return error ? std::optional{error->code} : std::nullopt;
+}
+
 // Advances the clock to `when` (never backwards) and polls.
 Poller::Result poll_at(Poller& poller, ManualClock& clock,
                        std::chrono::steady_clock::time_point when) {
@@ -121,6 +126,7 @@ TEST_CASE("Poller connects and reads every group on the first poll", "[modbus]")
 
     CHECK(client.connect_calls() == 1);
     CHECK(poller.connected());
+    CHECK_FALSE(poller.connection_error());
     CHECK(client.reads() == std::vector<Read>{{ModbusArea::coil, 0, 1},
                                               {ModbusArea::holding, 0, 3},
                                               {ModbusArea::input, 0, 1}});
@@ -216,6 +222,7 @@ TEST_CASE("Poller reports a failed initial connection once and retries with back
     const auto first = poller.poll();
 
     CHECK_FALSE(poller.connected());
+    CHECK(connection_errc(poller) == Errc::io_error);
     REQUIRE(first.samples.size() == 4);
     CHECK(all_bad(first.samples));
     for (const auto& sample : first.samples) {
@@ -257,6 +264,7 @@ TEST_CASE("Poller handles a device that stops responding while connected", "[mod
 
     // The first read times out after 500 ms; no further read is attempted.
     CHECK_FALSE(poller.connected());
+    CHECK(connection_errc(poller) == Errc::timeout);
     CHECK(client.close_calls() == 1);
     REQUIRE(lost.samples.size() == 4);
     CHECK(all_bad(lost.samples));
@@ -287,6 +295,7 @@ TEST_CASE("Poller handles a device that stops responding while connected", "[mod
         const auto recovered = poll_at(poller, clock, reconnect_at);
 
         CHECK(poller.connected());
+        CHECK_FALSE(poller.connection_error());
         REQUIRE(recovered.samples.size() == 4);
         CHECK(all_good(recovered.samples));
         CHECK(sample_of(recovered.samples, "speed").value == Value{std::int64_t{90}});
@@ -315,6 +324,7 @@ TEST_CASE("Poller marks only the tags of a block that got a Modbus exception", "
     const auto result = poll_at(poller, clock, t0 + 1s);
 
     CHECK(poller.connected());
+    CHECK_FALSE(poller.connection_error()); // the device answered: not a connection problem
     CHECK(client.close_calls() == 0);
     REQUIRE(result.samples.size() == 4);
     CHECK(sample_of(result.samples, "counter").quality == Quality::bad);

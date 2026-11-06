@@ -9,6 +9,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <optional>
 #include <vector>
 
 namespace f2c::drivers::modbus {
@@ -37,13 +38,17 @@ public:
 
     [[nodiscard]] bool connected() const noexcept;
 
+    // Why the connection is down (failed connect, or I/O error or timeout on a read); empty while
+    // connected. Modbus exception responses do not count: the connection is still fine.
+    [[nodiscard]] const std::optional<core::Error>& connection_error() const noexcept;
+
 private:
     using TimePoint = std::chrono::steady_clock::time_point;
 
-    // Appends the block's samples. False when the connection was lost (nothing appended).
-    bool read_block(const ReadBlock& block, std::vector<core::TagSample>& samples);
+    // Appends the block's samples. Error when the connection was lost (nothing appended).
+    core::Expected<void> read_block(const ReadBlock& block, std::vector<core::TagSample>& samples);
     // Closes the connection, reports every tag bad once per outage, schedules the retry.
-    Result fail_connection();
+    Result fail_connection(core::Error error);
     [[nodiscard]] core::TagSample sample(std::size_t tag, core::Value value, core::Quality quality,
                                          core::Timestamp time) const;
 
@@ -56,6 +61,7 @@ private:
     core::Backoff backoff_;
     TimePoint retry_at_;
     bool outage_reported_{false};
+    std::optional<core::Error> connection_error_;
 };
 
 } // namespace f2c::drivers::modbus
