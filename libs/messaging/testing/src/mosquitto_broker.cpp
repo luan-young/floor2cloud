@@ -27,8 +27,9 @@ std::string executable() {
         path != nullptr && *path != '\0') {
         return path;
     }
-    std::string found = F2C_MOSQUITTO_EXECUTABLE; // set by CMake; empty when it was not found
-    if (found.empty()) {
+    // Set by CMake; empty when it was not found.
+    constexpr const char* found = F2C_MOSQUITTO_EXECUTABLE;
+    if (*found == '\0') {
         throw std::runtime_error{
             "mosquitto not found: install it (apt-get install mosquitto) and re-run CMake, or set "
             "F2C_MOSQUITTO"};
