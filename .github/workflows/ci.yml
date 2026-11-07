@@ -52,6 +52,9 @@ jobs:
         with:
           cache-key: ${{ matrix.preset }}
 
+      - name: Install Mosquitto (broker for the MQTT component tests)
+        run: sudo apt-get install -y --no-install-recommends mosquitto
+
       - name: Configure
         run: cmake --preset ${{ matrix.preset }}
 
@@ -73,6 +76,9 @@ jobs:
       - uses: ./.github/actions/setup-vcpkg
         with:
           cache-key: asan
+
+      - name: Install Mosquitto (broker for the MQTT component tests)
+        run: sudo apt-get install -y --no-install-recommends mosquitto
 
       - name: Configure
         run: cmake --preset asan
