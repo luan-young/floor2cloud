@@ -1,6 +1,6 @@
 # 0003. Catch2 v3 and trompeloeil for tests
 
-Status: Accepted · Date: 2026-10-18 · Amended 2026-10-22 (test labels)
+Status: Accepted · Date: 2026-10-18 · Amended 2026-10-22 (test labels), 2026-11-07 (broker child process)
 
 ## Context
 
@@ -10,7 +10,7 @@ The project is developed test-first. Unit tests must run without network, Docker
 
 - **Catch2 v3** for all C++ tests, one unit-test executable per library, discovered by CTest (`catch_discover_tests`). Labels:
   - `unit`: pure code, no network, no Docker, no waiting. Run by every CI job.
-  - `component`: an I/O shell against a real third-party library, with everything inside the test process (e.g. the simulator's libmodbus server driven by a libmodbus client over loopback, on an ephemeral port). Deterministic and fast, so CI runs them too, including under ASan. They live in a separate `<lib>_component_tests` executable and may poll with a deadline, never a bare sleep.
+  - `component`: an I/O shell against a real third-party library, with everything inside the test process (e.g. the simulator's libmodbus server driven by a libmodbus client over loopback, on an ephemeral port), or in a lightweight server process the test itself starts, owns and stops (e.g. a Mosquitto broker on a free loopback port, from the system package). Deterministic and fast, so CI runs them too, including under ASan. They live in a separate `<lib>_component_tests` executable and may poll with a deadline, never a bare sleep.
   - `local`: needs a service outside the test process (e.g. a local TimescaleDB). Run by hand; not in CI.
 - Integration tests against the Compose stack are the one exception: they are written in pytest (ADR-0012).
 - **trompeloeil** for mocks where the interaction itself is the assertion (e.g. "publishes once, retained").

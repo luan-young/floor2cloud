@@ -18,6 +18,7 @@ These are the intended commands once the skeleton exists (CMake presets + vcpkg 
 - Build: `cmake --build --preset dev`
 - Test: `ctest --preset dev`
 - Single test: `ctest --preset dev -R <regex>`, or run the Catch2 test binary directly with a test name / `[tag]` filter
+- Component tests need the `mosquitto` binary on the host (`sudo apt-get install mosquitto`); the tests start their own broker on a free port
 - Run everything: `docker compose -f deploy/compose/docker-compose.yml up`
 - Integration tests (pytest, brings the stack up itself): `pip install -r tests/integration/requirements.txt && pytest tests/integration`
 

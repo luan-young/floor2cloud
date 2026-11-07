@@ -133,7 +133,7 @@ Every component with logic splits into a pure part that is unit-tested exhaustiv
 | Pure core (unit-tested) | Shell (covered by integration test) |
 | --- | --- |
 | `drivers::modbus::plan_scan_groups`, `decode_*`, `Poller` | `ModbusDriver` (timer), `LibmodbusClient` |
-| `messaging::ChangeFilter`, topic and JSON codec | `SamplePublisher` (strand + timer), `PahoMqttClient` |
+| `messaging::ChangeFilter`, topic and JSON codec | `SamplePublisher` (timer), `PahoMqttClient` |
 | `storage::SampleBatcher`, `BatchFlusher`, `to_row` | `HistorianPipeline` (timer), `PgSampleWriter` |
 | `sim::FillerModel` | libmodbus server loop |
 
@@ -782,26 +782,29 @@ struct MqttWill {
 };
 
 struct MqttConnectOptions {
-    std::string uri;
+    std::string uri;                                    // tcp://host:port (or mqtt://)
     std::string client_id;
     std::chrono::seconds keepalive{10};
     bool clean_session{true};
     std::optional<MqttWill> will;
     std::size_t max_buffered_messages{10'000};          // while disconnected; oldest dropped
-    std::chrono::milliseconds reconnect_min{500};
-    std::chrono::milliseconds reconnect_max{10'000};
+    // Reconnect backoff, doubling from min to max. Whole seconds: Paho's automatic reconnect
+    // has no finer resolution.
+    std::chrono::seconds reconnect_min{1};
+    std::chrono::seconds reconnect_max{10};
 };
 
 struct MqttMessage {
     std::string topic;
     std::string payload;
-    int qos;
-    bool retained;
+    int qos{0};
+    bool retained{false};
 };
 
-// Handlers run on a library thread; they must not block (post to your own executor).
+// Handlers run on a library thread; they must not block (post to your own executor) and must
+// not throw. Any of them may be empty.
 struct MqttHandlers {
-    std::function<void(bool session_present)> on_connected;   // after every successful (re)connect
+    std::function<void()> on_connected;                       // after every successful (re)connect
     std::function<void(std::string_view cause)> on_connection_lost;
     std::function<void(MqttMessage)> on_message;
 };
@@ -810,16 +813,21 @@ struct MqttHandlers {
 // All methods are thread-safe and non-blocking (except disconnect, bounded by its timeout).
 class MqttClient {
 public:
-    virtual ~MqttClient() = default;
+    virtual ~MqttClient() = default;                                  // non-copyable, non-movable
     virtual void connect() = 0;                                       // retries until disconnect()
     virtual void disconnect(std::chrono::milliseconds timeout) = 0;
-    // Buffered while disconnected. Error only for invalid arguments or a full buffer policy failure.
+    // Buffered while disconnected, also before the first connect. Error only for invalid
+    // arguments or when the library refuses the message.
     virtual core::Expected<void> publish(std::string topic, std::string payload, int qos, bool retain) = 0;
     // Remembered and re-applied after every reconnect.
     virtual core::Expected<void> subscribe(std::string filter, int qos) = 0;
 };
 
-[[nodiscard]] std::unique_ptr<MqttClient> make_paho_client(MqttConnectOptions options, MqttHandlers handlers);
+// Validates the options (invalid_argument); no I/O before connect(). Destroying the client
+// closes the connection cleanly, so the broker discards the will: it is published only if the
+// process dies or the network fails.
+[[nodiscard]] core::Expected<std::unique_ptr<MqttClient>> make_paho_client(MqttConnectOptions options,
+                                                                           MqttHandlers handlers);
 
 } // namespace f2c::messaging
 ```
@@ -871,20 +879,22 @@ namespace f2c::messaging {
 
 struct PublisherOptions {
     int qos{1};
-    std::chrono::seconds heartbeat{30};
+    std::chrono::seconds heartbeat{30};  // 0 disables
 };
 
-// All state lives on `executor`. submit() is the only method callable from any thread.
+// All state lives on `executor`, which runs on a single thread (ADR-0010). submit() is the only
+// method callable from any thread. Destroy it only once the executor no longer runs its handlers.
 class SamplePublisher {
 public:
-    SamplePublisher(asio::any_io_executor executor, MqttClient& client,
+    SamplePublisher(const asio::any_io_executor& executor, MqttClient& client,
                     PublisherOptions options, const core::Clock& clock = core::system_clock());
 
-    // Copies the samples, posts to the executor, stamps gateway_time, applies the ChangeFilter, publishes.
+    // Copies the samples, posts to the executor, stamps gateway_time, applies the ChangeFilter,
+    // publishes to tag_topic() (not retained). A failed publish is logged (warn once per streak).
     void submit(std::span<const core::TagSample> samples);
 
-    void start();  // arms the heartbeat timer
-    void stop();   // cancels it; call from the executor
+    void start();  // enables heartbeats: a timer armed for the earliest one due; call from the executor
+    void stop();   // disables them and cancels the timer; call from the executor
     // …
 };
 
@@ -1189,7 +1199,7 @@ Rules:
 
 - A sample is published when it is the tag's first, or its value or quality differs from the last **published** sample of that tag.
 - Heartbeat: if a tag has not been published for `heartbeat_s`, its **latest** sample (which may be newer than the last published one, with the same value) is republished with a fresh `gts`. If the driver is disconnected the latest sample is the `bad` one, whose `ts` does not change; the database ignores the duplicate (HIS-4).
-- Order is preserved per tag (single publisher strand, single MQTT connection, QoS 1).
+- Order is preserved per tag (publisher confined to one executor thread, single MQTT connection, QoS 1).
 
 ### 6.4 Gateway status payload
 
@@ -1300,6 +1310,7 @@ Exit codes: 0 clean shutdown, 1 configuration error, 2 fatal runtime error. Logs
 - `vcpkg.json` with a pinned `builtin-baseline`: asio, tl-expected, spdlog, yaml-cpp, libmodbus, paho-mqttpp3, nlohmann-json, libpqxx, catch2, trompeloeil.
 - Warnings as errors on every target through a shared `f2c_warnings` interface target.
 - vcpkg builds libmodbus with autotools, so the build host needs `autoconf autoconf-archive automake libtool` from the system package manager (CI and the Docker builder install them).
+- The MQTT component tests start the system `mosquitto` binary (`apt-get install mosquitto`; CI installs it). `F2C_MOSQUITTO` overrides the path CMake found.
 
 ## 9. Test plan
 
@@ -1309,7 +1320,7 @@ Exit codes: 0 clean shutdown, 1 configuration error, 2 fatal runtime error. Logs
 - **Unit tests** (Catch2 v3, label `unit`) cover the pure cores exhaustively. No network, no Docker, no `sleep`: time comes from `core::testing::ManualClock` or explicit `now` arguments.
 - **Test doubles**: hand-written fakes for stateful collaborators (`FakeModbusClient` with a register map and failure injection, `FakeSampleWriter`, `FakeMqttClient` recording publishes); trompeloeil mocks where the interaction itself is the assertion (e.g. "publishes exactly once with retain = true").
 - **Shells** (`ModbusDriver`, `SamplePublisher`, `PahoMqttClient`, `PgSampleWriter`, `HistorianPipeline`) are covered by the integration test plus a few cheap tests against the real library:
-  - **Component tests** (label `component`, run in CI): everything inside the test process, e.g. the simulator server or `LibmodbusClient` against the simulator running in-process on an ephemeral loopback port. They check only what unit tests cannot (wiring, wire format, connection handling), never the pure logic again. They may poll with a deadline, never a bare sleep.
+  - **Component tests** (label `component`, run in CI): everything inside the test process, e.g. the simulator server or `LibmodbusClient` against the simulator running in-process on an ephemeral loopback port, or in a server process the test starts and owns, e.g. `PahoMqttClient` against a Mosquitto child process. They check only what unit tests cannot (wiring, wire format, connection handling), never the pure logic again. They may poll with a deadline, never a bare sleep.
   - **Local smoke tests** (label `local`, run by hand): need a service outside the test process, e.g. `PgSampleWriter` against a local TimescaleDB.
 - See [ADR-0003](../adr/0003-catch2-trompeloeil.md) for the labels.
 - **Integration tests** (pytest, ADR-0012) run against the Compose stack; they map one-to-one to the acceptance criteria.
@@ -1356,7 +1367,7 @@ Exit codes: 0 clean shutdown, 1 configuration error, 2 fatal runtime error. Logs
 - Topic: `tag_topic` of the example; `tag_path_from_topic` round-trip; wrong prefix, wrong version, empty → error; `is_system_topic` for status topic; status topic format.
 - JSON codec: encode each value type (incl. `double 42.0` → `42.0`, `monostate` → `null`, NaN/±inf → `null`); decode each; round-trip; unknown keys ignored; every rejection rule in § 6.2; status encoding with and without `ts`.
 - ChangeFilter: first sample published; same value and quality suppressed; value change published; quality change with same value published; heartbeat returns the latest (not last-published) sample after the interval and not before; heartbeat 0 → never; `next_heartbeat`; independent tags don't interfere; heartbeats ordered by path.
-- SamplePublisher (with `FakeMqttClient`, `asio::io_context` run manually): `submit` from another thread ends up published on the executor; `gateway_time` stamped from the clock; topic, QoS and payload correct; suppressed duplicates not published.
+- SamplePublisher (with `FakeMqttClient`, `asio::io_context` run manually): `submit` from another thread ends up published on the executor; `gateway_time` stamped from the clock; topic, QoS and payload correct; samples copied before `submit` returns; suppressed duplicates not published; submission order kept; a failed publish does not stop later ones; no pending work after `stop` or with heartbeat 0.
 
 **storage** (`[storage]`)
 
@@ -1389,6 +1400,17 @@ Component (label `component`, `[modbus][component]`): `LibmodbusClient` and `Mod
 
 - `LibmodbusClient` reads holding, input and coil values of the register map; resolves `localhost`; an address outside the map → `protocol_error`, connection kept; a closed port → `io_error`; a socket that accepts but never answers → `timeout` after the response timeout; a stopped server → `io_error` or `timeout`.
 - `ModbusDriver` hands good samples for every tag to the sink and reports `running`; with nothing listening, every tag `bad` and `faulted`; `stop` is idempotent, allowed before `start`, and no sink call follows it; destroying a running driver is safe (checked under ASan).
+
+Component (label `component`, `[messaging][publisher][component]`): `SamplePublisher` on its own `io_context` thread with the real clock and a 1 s heartbeat: an unchanged tag is republished with the same value and `ts` and a fresh `gts`; heartbeats keep coming at the interval.
+
+Component (label `component`, `[mqtt][component]`): `PahoMqttClient` against a Mosquitto child process on a free loopback port, started and stopped by the test (`testing::MosquittoBroker`, one per test case):
+
+- subscribe, then receive its own QoS 1 publish; a clean disconnect is not reported as a lost connection;
+- a publish made before the first connect is delivered after it;
+- the retained will is published when a child process dies without disconnecting, and reaches a late subscriber; no will after a clean disconnect;
+- the first connect keeps retrying while nothing listens, and `disconnect` stops it promptly; with the broker down at start, it connects once the broker comes up;
+- after the broker restarts it reconnects and re-subscribes;
+- invalid topic, filter, QoS and options → `invalid_argument`.
 
 ### 9.4 Integration tests (`tests/integration`, pytest)
 
@@ -1482,7 +1504,7 @@ One task per pull request, tests first. Each task leaves `main` green.
 | 8 | `libs/drivers/modbus` part 2: `ModbusClient`, `FakeModbusClient`, `Poller` | 7 | Poller tests pass |
 | 9 | `libs/drivers/modbus` part 3: `LibmodbusClient`, `ModbusDriver` shell, `register_modbus_tcp` | 8, 5 | Component tests against the in-process simulator (§ 9.3) |
 | 10 | `libs/messaging` part 1: topic, JSON codec, ChangeFilter | 3 | Tests pass |
-| 11 | `libs/messaging` part 2: `MqttClient`, `PahoMqttClient`, `SamplePublisher` | 10 | SamplePublisher tests pass; manual check against a local Mosquitto |
+| 11 | `libs/messaging` part 2: `MqttClient`, `PahoMqttClient`, `SamplePublisher` | 10 | SamplePublisher unit and component tests pass; PahoMqttClient component tests (§ 9.3) pass against a Mosquitto child process |
 | 12 | `services/gateway`: CLI, config load, registry, drivers, publisher, status + will, signals, health file, logging | 9, 11 | Process-level config test passes; runs against simulator + Mosquitto and `mosquitto_sub` shows the contract |
 | 13 | `deploy/db`: init script | 0 | Applies cleanly on the pinned TimescaleDB image |
 | 14 | `libs/storage`: `to_row`, SampleBatcher, BatchFlusher, `PgSampleWriter` | 3, 13 | Unit tests pass; writer smoke test against a local TimescaleDB (`local` label) |
